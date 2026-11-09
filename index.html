@@ -330,6 +330,11 @@ td small{display:block;color:var(--cs-fg-2);font-size:12.5px}
   .panel-h{padding:16px}
   .panel-f .btn-p{flex:1;justify-content:center;min-height:48px}
 }
+#login{position:fixed;inset:0;z-index:60;background:var(--cs-head);display:grid;place-items:center;padding:16px}
+#login .lg-card{width:min(380px,100%);background:#fff;border:1px solid var(--cs-line);border-radius:18px;padding:28px 24px;box-shadow:var(--cs-shadow)}
+#login h1{font-family:var(--cs-font);font-size:22px;margin:10px 0 2px}
+#login .lg-logo{width:44px;height:auto}
+#login .field{margin:18px 0 6px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 
@@ -731,17 +736,64 @@ function seed() {
   const anson = o({ id: 'ob3vss1l', firma: 'ANSON AG', kontakt: 'Ute Klümper', anrede: 'Herr', email: 'ute.kluemper@anson.ch', tel: '+41 44 461 11 11', adresse: 'Friesenbergstrasse 108, 8055 Zürich', objNr: '4317', start: '2026-10-23', startZeit: '', startPer: 'Ende Oktober 2026', startFix: false, freq: '2x pro Woche', aufwand: 1.35, tage: ['Di', 'Fr'], zeit: 'ab 18 Uhr', ma: [], bewerb: [{ n: 'Diogo Pereira', pnr: '37736', d: '2026-10-24', z: '15:30' }, { n: 'Cristian Gambale', pnr: '23205', d: '2026-10-20', z: '15:45' }, { n: 'Margarita Mendez Novas', pnr: '47605', d: '2026-10-21', z: '18:00' }], chat: false, verk: 'Mirco Scaramuzzo', al: 'Sergio Da Silva', status: 'geplant', neu: true, fenster: { preis: 190, nr: '4317', datum: '2026-10-12' }, extras: [{ k: 'fenster', n: 'Fensterreinigung 2-seitig', mode: 'pauschal', p: 190, unit: 'pro Ausführung' }], wasch: false,
     termin: { datum: TD, zeit: '16:00', invited: true, von: 'Mirco Scaramuzzo', am: '2026-10-19' },
     log: [{ t: '2026-10-12', x: 'Besichtigung durch Mirco Scaramuzzo, Offerte gesendet' }, { t: '2026-10-16', x: 'Gewonnen (aktiv) im Verkaufstool · Reinigungsstart 23.10.2026, 17:30 Uhr' }, { t: '2026-10-19', x: 'Startgespräch im Verkaufstool gesetzt von Mirco Scaramuzzo: ' + fmtDay(TD) + ', 16:00 Uhr · Abteilungsleiter Sergio Da Silva' }, { t: '2026-10-19', x: 'Kalendereinladung an ute.kluemper@anson.ch und s.silva@clean-service.ch gesendet' }] });
-  return [anson];
+  return [];   /* keine Beispieldaten: Startgespräche kommen aus dem Verkaufstool */
 }
 
 let S = null, SET = null;
 Object.defineProperty(window, 'S_ALL', { get: () => S.filter(o => !o.incoming) });
-const KEY = 'cs-startgespraech-v14';
-function load() {
-  try { const j = JSON.parse(localStorage.getItem(KEY) || 'null'); if (j && j.objs) { S = j.objs; SET = Object.assign({}, DEFAULT_SET, j.set || {}); return; } } catch (e) {}
-  S = seed(); SET = JSON.parse(JSON.stringify(DEFAULT_SET));
+/* ===================== Server (Supabase «Besprechungstermin» über /api) ===================== */
+const KEY = 'cs-sg-set-v1', TKEY = 'cs-sg-token';
+const NET = { token: '', sent: {}, timer: null, busy: false, again: false, ok: true };
+try { NET.token = localStorage.getItem(TKEY) || ''; } catch (e) {}
+function loadSet() { try { const j = JSON.parse(localStorage.getItem(KEY) || 'null'); SET = Object.assign(JSON.parse(JSON.stringify(DEFAULT_SET)), j || {}); } catch (e) { SET = JSON.parse(JSON.stringify(DEFAULT_SET)); } }
+const clean = o => { const c = Object.assign({}, o); delete c.incoming; delete c._v; return c; };
+const sig = o => JSON.stringify(clean(o));
+async function api(path, opt = {}) {
+  const r = await fetch('/api/' + path, { method: opt.method || 'GET', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + NET.token }, body: opt.body ? JSON.stringify(opt.body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && path !== 'login') { showLogin(j.error || 'Bitte neu anmelden'); throw new Error('login'); }
+  if (!r.ok) throw new Error(j.error || 'Fehler ' + r.status);
+  return j;
 }
-function save() { try { localStorage.setItem(KEY, JSON.stringify({ objs: S.map(o => { const c = Object.assign({}, o); delete c.incoming; return c; }), set: SET })); } catch (e) {} }
+function setNet(ok, txt) { NET.ok = ok; const el = document.getElementById('netState'); if (el) { el.textContent = txt; el.className = 'badge ' + (ok ? 'b-ok' : 'b-err'); } }
+async function load() {
+  loadSet();
+  const j = await api('gespraeche'); const before = new Set((S || []).map(o => o.id)), loc = Object.fromEntries((S || []).map(o => [o.id, o]));
+  S = (j.items || []).map(o => { const l = loc[o.id]; return l && sig(l) !== NET.sent[o.id] ? l : o; });
+  (S).forEach(o => { if (!loc[o.id] || sig(loc[o.id]) === NET.sent[o.id]) NET.sent[o.id] = sig(o); });
+  Object.values(loc).forEach(l => { if (!S.find(o => o.id === l.id)) S.push(l); });
+  setNet(true, 'Gespeichert');
+  return { neu: S.filter(o => !before.has(o.id) && before.size), sync: j.sync || {} };
+}
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(SET)); } catch (e) {}
+  clearTimeout(NET.timer); setNet(true, 'Wird gespeichert …'); NET.timer = setTimeout(flush, 700);
+}
+async function flush() {
+  if (NET.busy) { NET.again = true; return; }
+  const dirty = S.filter(o => sig(o) !== NET.sent[o.id]); if (!dirty.length) { setNet(true, 'Gespeichert'); return; }
+  NET.busy = true; const snap = Object.fromEntries(dirty.map(o => [o.id, sig(o)]));
+  try {
+    const j = await api('gespraeche', { method: 'PUT', body: { von: SET.me, items: dirty.map(o => ({ id: o.id, version: o._v || 0, daten: clean(o) })) } });
+    let err = '';
+    (j.results || []).forEach(r => { const o = objOf(r.id); if (!o) return;
+      if (r.error) { err = r.error; return; }
+      if (r.konflikt) { const i = S.indexOf(o); S[i] = Object.assign({}, r.daten, { id: r.id, _v: r.version }); NET.sent[r.id] = sig(S[i]); toast(`${o.firma}: wurde inzwischen auf einem anderen Gerät geändert, neuer Stand geladen`, 'warning'); render(); if (UI.panel) renderPanel(); return; }
+      o._v = r.version; NET.sent[r.id] = snap[r.id]; });
+    setNet(!err, err ? 'Nicht gespeichert' : 'Gespeichert'); if (err) toast('Nicht gespeichert: ' + err, 'error');
+  } catch (e) { if (e.message !== 'login') { setNet(false, 'Offline, nicht gespeichert'); setTimeout(flush, 15000); } }
+  finally { NET.busy = false; if (NET.again) { NET.again = false; flush(); } }
+}
+window.addEventListener('beforeunload', e => { if (S && S.some(o => sig(o) !== NET.sent[o.id])) { flush(); e.preventDefault(); e.returnValue = ''; } });
+function showLogin(msg) {
+  let d = document.getElementById('login'); if (!d) { d = document.createElement('div'); d.id = 'login'; document.body.appendChild(d); }
+  d.innerHTML = `<div class="lg-card"><img src="${$('.signet img') ? $('.signet img').src : ''}" alt="" class="lg-logo"><h1>Startgespräch UH</h1><p class="muted">Clean Service Scaramuzzo AG</p>
+    <form id="lgF"><div class="field"><label for="lgC">Zugangscode</label><input id="lgC" type="password" autocomplete="current-password" required></div><p class="small" id="lgE" style="color:var(--cs-err);min-height:20px">${esc(msg || '')}</p><button class="btn btn-p" style="width:100%;justify-content:center">Anmelden</button></form></div>`;
+  d.hidden = false; setTimeout(() => { const i = $('#lgC'); if (i) i.focus(); }, 50);
+  $('#lgF').addEventListener('submit', async e => { e.preventDefault(); const b = e.target.querySelector('button'); b.disabled = true;
+    try { const j = await api('login', { method: 'POST', body: { code: $('#lgC').value } }); NET.token = j.token; try { localStorage.setItem(TKEY, j.token); } catch (x) {} d.hidden = true; boot(); }
+    catch (x) { $('#lgE').textContent = x.message === 'login' ? 'Zugangscode falsch' : x.message; b.disabled = false; } });
+}
 const objOf = id => S.find(o => o.id === id);
 const alOf = n => SET.al.find(a => a.n === n) || { n, k: (n || '??').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase() };
 const logO = (o, x) => o.log.push({ t: TD, x });
@@ -781,10 +833,10 @@ function render() { clearLots(); ({ dash: renderDash, list: renderList, prot: re
 /* ===================== Dashboard ===================== */
 function todos() {
   const t = [], S = window.S_ALL.filter(mine);
-  S.filter(o => o.neu && o.status !== 'erledigt').forEach(o => t.push({ id: 'nu-' + o.id, key: 'mail', b: `Neu: Startgespräch ${o.firma}`, s: `${fmtDay(o.termin.datum)}, ${o.termin.zeit} Uhr · ${o.adresse}`, urgent: false, act: () => openProt(o.id) }));
+  S.filter(o => o.neu && o.status !== 'erledigt').forEach(o => t.push({ id: 'nu-' + o.id, key: 'mail', b: `Neu: Startgespräch ${o.firma}`, s: `${o.termin && o.termin.datum ? fmtDay(o.termin.datum) + ', ' + o.termin.zeit + ' Uhr' : 'Noch kein Termin, bitte mit dem Kunden vereinbaren'} · ${o.adresse}`, urgent: false, act: () => openProt(o.id) }));
   S.filter(o => !o.neu && o.status !== 'erledigt' && o.termin && o.termin.datum === TD).forEach(o => t.push({ id: 'sg-' + o.id, key: 'calendar', b: `Startgespräch vor Ort: ${o.firma}`, s: `${o.termin.zeit} Uhr · ${o.adresse}`, urgent: true, act: () => openProt(o.id) }));
   S.filter(o => !o.neu && stOf(o) === 'nachtragen').forEach(o => t.push({ id: 'np-' + o.id, key: 'warning', b: `Protokoll nachtragen: ${o.firma}`, s: `Termin war am ${fmtShort(o.termin.datum)}`, urgent: true, act: () => openProt(o.id) }));
-  S.filter(o => stOf(o) === 'offen').sort((a, b) => a.start.localeCompare(b.start)).forEach(o => t.push({ id: 'tp-' + o.id, key: 'bell', b: `Termin planen: ${o.firma}`, s: `Reinigungsstart ${fmtShort(o.start)} (${inTxt(o.start)})`, urgent: daysTo(o.start) <= 10, act: () => openPanel(o.id, 'plan') }));
+  S.filter(o => stOf(o) === 'offen' && !o.neu).sort((a, b) => (a.start || '9').localeCompare(b.start || '9')).forEach(o => t.push({ id: 'tp-' + o.id, key: 'bell', b: `Startgespräch vereinbaren: ${o.firma}`, s: o.start ? `Vertragsbeginn ${fmtShort(o.start)} (${inTxt(o.start)})` : (o.startPer ? 'Vertragsbeginn per ' + o.startPer : 'Vertragsbeginn noch offen'), urgent: !!o.start && daysTo(o.start) <= 10, act: () => openPanel(o.id, 'plan') }));
   S.filter(o => o.status === 'erledigt' && o.start >= TD && daysTo(o.start) <= 3).forEach(o => t.push({ id: 'st-' + o.id, key: 'broom', b: `Reinigungsstart begleiten: ${o.firma}`, s: `${fmtDay(o.start)} · ${teamTxt(o) || 'Team offen'}`, urgent: false, act: () => openPanel(o.id) }));
   return t;
 }
@@ -797,7 +849,7 @@ function renderDash() {
   el.innerHTML = phead(`Startgespräch UH · ${fmtDay(TD)}`, 'Heute zu tun', `${esc(SET.me)} · ${open ? open + ' Aufgabe' + (open > 1 ? 'n' : '') + ' offen' : 'Alles erledigt'} · ${k.geplant} geplante Startgespräche`, `<button class="btn btn-p" data-go="list">${ico('i-cal')}Meine Gespräche</button>`) + `
   <div class="content"><div class="dash">
     <div class="card"><div class="card-h"><h2>Heute zu tun</h2><span class="badge b-neutral" id="todoCnt">${open} offen</span></div>
-      ${t.length ? `<ul class="todo">${t.map(x => `<li class="${UI.done[x.id] ? 'done' : ''}" data-todo="${x.id}"><div class="ic" data-lot="${x.key}"></div><div class="tx">${x.urgent ? '<span class="badge b-warn mob">Dringend</span>' : ''}<b>${esc(x.b)}</b><small>${esc(x.s)}</small></div>${x.urgent ? '<span class="badge b-warn desk">Dringend</span>' : ''}<button class="check" data-check="${x.id}" aria-label="Erledigt: ${esc(x.b)}"><svg><use href="#i-ok"/></svg></button></li>`).join('')}</ul>` : emptyState('Heute steht nichts an. Sobald ein Auftrag gewonnen ist, erscheint hier der nächste Schritt.')}
+      ${t.length ? `<ul class="todo">${t.map(x => `<li class="${UI.done[x.id] ? 'done' : ''}" data-todo="${x.id}"><div class="ic" data-lot="${x.key}"></div><div class="tx">${x.urgent ? '<span class="badge b-warn mob">Dringend</span>' : ''}<b>${esc(x.b)}</b><small>${esc(x.s)}</small></div>${x.urgent ? '<span class="badge b-warn desk">Dringend</span>' : ''}<button class="check" data-check="${x.id}" aria-label="Erledigt: ${esc(x.b)}"><svg><use href="#i-ok"/></svg></button></li>`).join('')}</ul>` : emptyState('Noch keine Startgespräche. Sobald ein Kunde im Verkaufstool den Auftrag erteilt und den Termin gebucht hat, erscheint er hier.')}
     </div>
     <div><div class="kpis">
       <div class="card kpi"><div class="l">Neu aus Verkaufstool</div><div class="v num">${S.filter(o => o.neu).length}</div><div class="d up">noch nicht angesehen</div></div>
@@ -827,7 +879,7 @@ function renderList() {
     <div class="chips"><button class="chip" data-mine aria-pressed="${!UI.alle}">Nur meine</button>${['Alle', 'Offen', 'Geplant', 'Erledigt'].map(f => `<button class="chip" data-f="${f}" aria-pressed="${F === f}">${f} · ${cnt(f)}</button>`).join('')}</div></div>
     <div class="card tablewrap">${rows.length ? `<table><thead><tr><th>Kunde</th><th>Objekt</th><th>Startgespräch</th><th>Reinigungsstart</th><th>Einsatz</th><th>Abteilungsleiter</th><th>Status</th></tr></thead><tbody>
       ${rows.map(o => `<tr data-open="${o.id}" aria-selected="${UI.panel && UI.panel.id === o.id}"><td><span class="name">${esc(o.firma)}</span>${o.neu ? ' <span class="badge b-info" style="margin-left:6px">Neu</span>' : ''}<small>${esc(o.kontakt)}</small></td><td>${esc(o.adresse.split(',')[0])}<small>Nr. ${esc(o.objNr)} · ${esc(o.adresse.split(',')[1] || '')}</small></td><td class="num">${tTxt(o)}</td><td class="num">${o.startFix ? fmtShort(o.start) + (o.startZeit ? ', ' + o.startZeit : '') + `<small>${inTxt(o.start)}</small>` : 'per ' + esc(o.startPer || '–') + '<small>noch nicht fixiert</small>'}</td><td>${esc(o.freq)}<small>${esc(o.tage.join(', '))} · ${o.aufwand} h</small></td><td>${esc(o.al)}</td><td>${badge(o)}</td></tr>`).join('')}</tbody></table>
-      <div class="mlist">${rows.map(o => `<div class="mrow" data-open="${o.id}"><div class="tx"><b>${esc(o.firma)}${o.neu ? ' <span class="badge b-info">Neu</span>' : ''}</b><small>${o.termin && o.termin.datum ? 'Startgespräch ' + fmtShort(o.termin.datum) + ', ' + o.termin.zeit : 'Start ' + (o.startFix ? fmtShort(o.start) : 'per ' + (o.startPer || '–')) + ' · Termin offen'}</small><small>${esc(o.adresse)}</small></div>${badge(o)}${ico('i-chev')}</div>`).join('')}</div>` : emptyState('Kein Startgespräch in dieser Ansicht.')}</div>
+      <div class="mlist">${rows.map(o => `<div class="mrow" data-open="${o.id}"><div class="tx"><b>${esc(o.firma)}${o.neu ? ' <span class="badge b-info">Neu</span>' : ''}</b><small>${o.termin && o.termin.datum ? 'Startgespräch ' + fmtShort(o.termin.datum) + ', ' + o.termin.zeit : 'Start ' + (o.startFix ? fmtShort(o.start) : 'per ' + (o.startPer || '–')) + ' · Termin offen'}</small><small>${esc(o.adresse)}</small></div>${badge(o)}${ico('i-chev')}</div>`).join('')}</div>` : emptyState(S_ALL.length ? 'Kein Startgespräch in dieser Ansicht.' : 'Noch keine Startgespräche. Termine aus dem Verkaufstool erscheinen hier automatisch.')}</div>
   </div>`;
   $('#q', el).addEventListener('input', e => { UI.q = e.target.value; const v = e.target.value; renderList(); const i = $('#q'); i.focus(); i.setSelectionRange(v.length, v.length); });
   $('[data-mine]', el).addEventListener('click', () => { UI.alle = !UI.alle; renderList(); });
@@ -890,7 +942,7 @@ function planSend(o, btn) {
 
 /* ===================== Protokoll (Formular) ===================== */
 function openProt(id) { const o = objOf(id); if (o.neu) { o.neu = false; logO(o, `Protokoll vorbereitet und geöffnet von ${SET.me}`); } if (!o.prot) { o.prot = Object.assign(PROT_EMPTY(), { termin: (o.termin && o.termin.datum) || TD, start: o.startFix ? o.start : '', startZeit: o.startFix ? (o.startZeit || '') : '', freq: o.freq, aufwand: String(o.aufwand || ''), tage: o.tage.slice(0, perWeek(o.freq)), zeit: /^(Vormittags|Nachmittags|Abends)$/.test(o.zeit) ? o.zeit : 'Andere', zeitAndere: /^(Vormittags|Nachmittags|Abends)$/.test(o.zeit) ? '' : o.zeit, ma: [o.ma[0] || '', o.ma[1] || '', o.ma[2] || '', o.ma[3] || ''], notfall: [{ n: `${o.anrede} ${o.kontakt}`, t: o.tel || '' }], notfallPrio: 0, wasch: o.wasch ? 'Ja' : 'Nein', waschPro: 'Waschgang', zxN: 0 }); save(); } UI.protId = id; UI.step = 0; go('prot'); }
-const STEPS = ['Termin & Kunde', 'Reinigung', 'Alarm & Schlüssel', 'Material & Putzraum', 'Container & Entsorgung', 'Zusatz- & Spezialreinigung', 'Abschluss & Unterschriften'];
+const STEPS = ['Termin & Kunde', 'Reinigung', 'Alarm & Schlüssel', 'Material & Putzraum', 'Container & Entsorgung', 'Spezialreinigungen', 'Abschluss & Unterschriften'];
 const fld = (id, label, inner, opt = {}) => `<div class="field ${opt.pre ? 'pre' : ''} ${opt.cls || ''}"><label for="${id}">${label}${opt.req ? ' <span class="req">*</span>' : ''}${opt.pre ? ' <span class="muted" style="font-weight:400">· aus Verkaufstool</span>' : ''}</label>${inner}<div class="msg">${opt.msg || 'Pflichtfeld'}</div></div>`;
 const inp = (id, v, extra = '') => `<input id="${id}" data-k="${id}" value="${esc(v)}" ${extra}>`;
 const txa = (id, v, ph = '') => `<textarea id="${id}" data-k="${id}" placeholder="${esc(ph)}">${esc(v)}</textarea>`;
@@ -1204,7 +1256,7 @@ function renderSet() {
     <div class="card fsec"><h2>Einladung an den Kunden</h2><p class="hint">Platzhalter: {firma} {anrede} {name} {datum} {zeit} {start} {adresse} {al}</p>${fld('sBetr', 'Betreff', `<input id="sBetr" value="${esc(SET.mailBetreff)}">`)}${fld('sText', 'Text', `<textarea id="sText" style="min-height:220px">${esc(SET.mailText)}</textarea>`)}${fld('sDauer', 'Dauer des Kalendertermins (Minuten)', `<input id="sDauer" type="number" inputmode="numeric" value="${SET.dauer}">`)}</div>
     <div class="card fsec"><h2>Nach der Unterschrift automatisch</h2><p class="hint">Was die App nach dem Abschluss des Protokolls auslöst.</p>
       ${[['pdf', 'Schlüssel- und Schadenprotokoll als PDF an den Kunden mailen (Protokoll geht immer nur intern an unterhalt@)'], ['chat', 'Protokoll in den Beekeeper-Gruppenchat des Kunden'], ['ordner', 'Schlüssel und Badges im Objektordner hinterlegen'], ['offerte', 'Nachofferte Spezialreinigung als Entwurf ins Verkaufstool an den Verkäufer'], ['cal', 'Reinigungsstart im Kalender von Abteilungsleiter und Team']].map(([k, t]) => `<label class="dnav" style="min-height:44px;padding:8px 4px"><input type="checkbox" data-auto="${k}" ${SET.auto[k] ? 'checked' : ''} style="width:20px;height:20px;accent-color:#1b8384">${t}</label>`).join('')}</div>
-    <div class="card fsec"><h2>Daten</h2><p class="hint">Diese Vorschau speichert alles lokal auf diesem Gerät. Die Live-Version hängt an der Datenbank der Verkaufsapp.</p><button type="button" class="btn btn-s" id="reset">Beispieldaten zurücksetzen</button></div>
+    <div class="card fsec"><h2>Daten</h2><p class="hint">Alle Startgespräche werden zentral gespeichert (Supabase «Besprechungstermin») und kommen automatisch aus dem Verkaufstool. Stand: <span id="netState" class="badge b-ok">Gespeichert</span></p><div style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="btn btn-s" id="reset">Jetzt abgleichen</button><button type="button" class="btn btn-g" id="logout">Abmelden</button></div></div>
   </div></div>`;
   $('#sMe').addEventListener('change', e => { SET.me = e.target.value; save(); render(); toast('Gespeichert'); });
   $$('[data-al]', el).forEach(i => i.addEventListener('change', () => { const [k, p] = i.dataset.al.split('|'); SET.al[+k][p] = i.value; SET.al[+k].k = i.value.split(' ').map(w => w[0] || '').join('').slice(0, 2).toUpperCase(); save(); toast('Gespeichert'); }));
@@ -1213,18 +1265,27 @@ function renderSet() {
   $('#sText').addEventListener('change', e => { SET.mailText = e.target.value; save(); toast('Gespeichert'); });
   $('#sDauer').addEventListener('change', e => { SET.dauer = +e.target.value || 60; save(); toast('Gespeichert'); });
   $$('[data-auto]', el).forEach(i => i.addEventListener('change', () => { SET.auto[i.dataset.auto] = i.checked; save(); toast('Gespeichert'); }));
-  $('#reset').addEventListener('click', () => { try { localStorage.removeItem(KEY); } catch (e) {} load(); UI.done = {}; UI.protId = null; render(); toast('Beispieldaten zurückgesetzt', 'info'); });
+  $('#reset').addEventListener('click', () => refresh(true)); $('#logout').addEventListener('click', () => { try { localStorage.removeItem(TKEY); } catch (e) {} NET.token = ''; showLogin(''); });
 }
 
 /* ===================== Start ===================== */
 document.addEventListener('click', e => { const b = e.target.closest('[data-go]'); if (b) go(b.dataset.go); });
 $('#menuBtn').addEventListener('click', openDrawer); $('#drawerX').addEventListener('click', closeDrawer); $('#dscrim').addEventListener('click', closeDrawer); $('#scrim').addEventListener('click', closePanel);
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeDrawer(); closePanel(); } });
-load();
-/* Neue Einladungen aus dem Verkaufstool kommen automatisch an (in der Live-Version per Datenbank-Abgleich alle paar Sekunden) */
-S.filter(o => o.neu).forEach(o => o.incoming = true);
-render();
-setTimeout(() => { const n = S.filter(o => o.incoming); if (!n.length) return; n.forEach(o => delete o.incoming); render(); if (UI.panel) renderPanel(); toast(n.length > 1 ? n.length + ' neue Startgespräche aus dem Verkaufstool' : `Neues Startgespräch: ${n[0].firma}, ${fmtDay(n[0].termin.datum)}`, 'mail'); }, 2200);
+async function refresh(manual) {
+  try { const r = await load(); render(); if (UI.panel) renderPanel();
+    if (r.neu.length) toast(r.neu.length > 1 ? r.neu.length + ' neue Startgespräche aus dem Verkaufstool' : `Neues Startgespräch: ${r.neu[0].firma}${r.neu[0].termin ? ', ' + fmtDay(r.neu[0].termin.datum) : ''}`, 'mail');
+    else if (manual) toast(r.sync.hinweis || 'Abgeglichen, alles aktuell', r.sync.hinweis ? 'warning' : 'ok');
+  } catch (e) { if (e.message !== 'login') { setNet(false, 'Offline'); if (manual) toast('Server nicht erreichbar: ' + e.message, 'error'); } }
+}
+let booted = false;
+async function boot() {
+  if (!NET.token) { S = []; loadSet(); showLogin(''); return; }
+  try { await load(); } catch (e) { if (e.message === 'login') return; S = []; loadSet(); toast('Server nicht erreichbar: ' + e.message, 'error'); }
+  render();
+  if (!booted) { booted = true; setInterval(() => { if (!document.hidden && !NET.busy && S.every(o => sig(o) === NET.sent[o.id])) refresh(false); }, 60000); document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(false); }); }
+}
+S = []; loadSet(); render(); boot();
 </script>
 
 </body></html>
