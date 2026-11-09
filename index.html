@@ -784,6 +784,27 @@ async function flush() {
   } catch (e) { if (e.message !== 'login') { setNet(false, 'Offline, nicht gespeichert'); setTimeout(flush, 15000); } }
   finally { NET.busy = false; if (NET.again) { NET.again = false; flush(); } }
 }
+/* Echte Aktionen (Versand, Beekeeper, Stellenportal) laufen über /api/aktion. Vorher alles speichern, weil der Server den gespeicherten Stand verwendet. */
+const wait = ms => new Promise(r => setTimeout(r, ms));
+async function flushNow() {
+  clearTimeout(NET.timer);
+  for (let i = 0; i < 60 && NET.busy; i++) await wait(250);
+  await flush();
+  for (let i = 0; i < 60 && NET.busy; i++) await wait(250);
+  return S.every(o => sig(o) === NET.sent[o.id]);
+}
+function sendX(o) {
+  const P = o.prot || {}, mz = z => ({ off: !!z.off, n: z.n, menge: z.mode === 'm2' && z.m2 ? String(z.m2).replace('.', ',') + ' m²' : '', total: +z.total || 0, dispo: !!(z.dispo || []).length });
+  return { team: teamTxt(o), mat: matList(P).map(m => ({ id: m.id, n: m.n, e: m.e, m: +m.m })), zl: zlItems(o, P).filter(z => z.off || z.mode !== 'nein').map(mz), nach: zlNach(o, P).map(mz),
+    desc: grpDesc(o), alMail: alOf(o.al).m || '', autoPdf: !!SET.auto.pdf, autoOfferte: !!SET.auto.offerte, autoChat: !!SET.auto.chat, vm: P.material === 'Kunde' ? vmCodes() : [] };
+}
+async function runAktion(o, art, extra) {
+  if (!(await flushNow())) throw new Error('Gespräch konnte nicht gespeichert werden, bitte Verbindung prüfen');
+  const j = await api('aktion', { method: 'POST', body: Object.assign({ art, id: o.id, von: SET.me }, extra || {}) });
+  return j.results || [];
+}
+const resTxt = rs => rs.map(r => (r.ok ? '✓ ' : '✗ ') + r.t).join(' · ');
+const badTxt = rs => rs.filter(r => !r.ok).map(r => r.t).join(' · ');
 window.addEventListener('beforeunload', e => { if (S && S.some(o => sig(o) !== NET.sent[o.id])) { flush(); e.preventDefault(); e.returnValue = ''; } });
 function showLogin(msg) {
   let d = document.getElementById('login'); if (!d) { d = document.createElement('div'); d.id = 'login'; document.body.appendChild(d); }
@@ -1074,9 +1095,13 @@ document.addEventListener('click', e => {
   if (a === 'pick') UI.vakC = { id, i: +i };
   if (a === 'cancel') UI.vakC = null;
   if (a === 'ok') { const ap = (o.bewerb || []).map(x => typeof x === 'string' ? { n: x } : x), p = ap[+i], rest = ap.filter((_, j) => j !== +i);
-    o.ma = [p.n]; o.vakVon = SET.me + ' im Startgespräch'; UI.vakC = null;
-    logO(o, `Vakanz besetzt durch ${SET.me}: ${p.n}` + (rest.length ? ` · Absage an ${rest.map(x => x.n).join(', ')}` : '') + ' · Stellenportal: vergeben' + ' · im Kundenchat hinzugefügt');
-    save(); toast(`${p.n} ist eingeteilt und im Kundenchat`, 'team'); }
+    if (UI.vakBusy) return; UI.vakBusy = id; UI.vakC = null; toast(`${p.n} wird eingeteilt …`, 'info');
+    runAktion(o, 'vakanz', { name: p.n, rest: rest.map(x => x.n) }).then(rs => {
+      const L = objOf(id) || o; L.ma = [p.n]; L.vakVon = SET.me + ' im Startgespräch';
+      logO(L, `Vakanz besetzt durch ${SET.me}: ${p.n} · ` + resTxt(rs)); save();
+      toast(rs.every(r => r.ok) ? `${p.n} ist eingeteilt und im Kundenchat` : `${p.n} eingeteilt. Offen: ${badTxt(rs)}`, rs.every(r => r.ok) ? 'team' : 'warning');
+    }).catch(e => { if (e.message !== 'login') toast('Nicht ausgeführt: ' + e.message, 'error'); })
+      .finally(() => { UI.vakBusy = null; if (UI.view === 'prot') renderProt(); if (UI.panel) renderPanel(); }); }
   if (UI.view === 'prot') renderProt(); if (UI.panel) renderPanel();
 });
 /* Zusatzleistungen wie im Verkaufstool: Fenster, Glastrennwände, Teppiche + «Andere Leistung» */
@@ -1184,9 +1209,18 @@ function finish(o, btn) {
   setTimeout(() => {
     o.status = 'erledigt'; if (!o.termin) o.termin = { datum: o.prot.termin, zeit: '', invited: false }; o.start = o.prot.start || o.start; o.startZeit = o.prot.startZeit || ''; o.startFix = true; o.tage = o.prot.tage.slice();
     logO(o, 'Protokoll vor Ort unterschrieben');
-    const done = autoList(o).filter(a => a.on).map(a => a.t); if (done.length) logO(o, done.join(' · ')); save();
-    UI.protId = o.id; go('doc'); toast('Protokoll abgeschlossen, Kunde und Team sind informiert', 'sparkle');
-  }, 1200);
+    delete o.sendRes; o.sending = true; save();
+    UI.protId = o.id; go('doc'); toast('Protokoll abgeschlossen, Versand läuft …', 'info');
+    runAktion(o, 'abschluss', { x: sendX(o) }).then(rs => {
+      const L = objOf(o.id) || o; L.sending = false; L.sendRes = { at: TD, results: rs }; logO(L, 'Versand: ' + resTxt(rs)); save();
+      const bad = rs.filter(r => !r.ok).length;
+      toast(bad ? `Versendet, ${bad} Punkt${bad > 1 ? 'e' : ''} offen (siehe «Ausgelöst»)` : 'Protokoll abgeschlossen, Kunde und Team sind informiert', bad ? 'warning' : 'sparkle');
+    }).catch(e => {
+      if (e.message === 'login') return;
+      const L = objOf(o.id) || o; L.sending = false; L.sendRes = { at: TD, results: [{ ok: false, t: 'Versand fehlgeschlagen: ' + e.message + '. Mit «PDFs erneut an unterhalt@ senden» wiederholen.' }] }; logO(L, 'Versand fehlgeschlagen: ' + e.message); save();
+      toast('Versand fehlgeschlagen: ' + e.message, 'error');
+    }).finally(() => { if (UI.view === 'doc') renderDoc(); });
+  }, 300);
 }
 
 /* ===================== Protokoll (Ansicht) ===================== */
@@ -1208,10 +1242,12 @@ function renderDoc() {
     <div class="card dsec"><h3>Schäden und Material</h3><dl class="dl">${L('Schäden', esc(P.schaeden) + (P.schaeden === 'Ja' ? ' · ' + esc(P.schaedenBem) : '') + ph(P.schaedenFotos))}${L('Sonstige Infos', esc(P.material2))}</dl></div>
     <div class="card dsec"><h3>Unterschriften</h3><dl class="dl">${L('Kunde', sigImg(P.sigK))}${L('Clean Service Scaramuzzo AG', sigImg(P.sigCS))}</dl></div>
     <div class="card dsec"><h3>Gruppenbeschreibung Beekeeper</h3><p class="small muted" style="margin-bottom:10px">Wird nach dem Absenden in der Beschreibung des Gruppenchats «${esc(o.firma)} - OBJ ${esc(o.objNr)}» ergänzt. Ohne Zusatz-, Fenster- und Spezialreinigung.</p><pre style="white-space:pre-wrap;font:inherit;font-size:14px;line-height:1.5;margin:0;background:var(--cs-bg-soft);border:1px solid var(--cs-line);border-radius:10px;padding:12px 14px">${esc(grpDesc(o))}</pre><div class="small muted" style="text-align:right;margin-top:6px">${grpDesc(o).length} / 300 Zeichen</div></div>
-    <div class="card dsec"><h3>Ausgelöst</h3><ul class="acts">${autoList(o).map(a => `<li><span class="${a.on ? 'ok' : 'muted'}">${a.on ? '✓' : '–'}</span><span>${esc(a.t)}</span></li>`).join('')}</ul></div>
+    <div class="card dsec"><h3>${o.sendRes ? 'Ausgelöst' : o.sending ? 'Versand läuft …' : 'Wird beim Abschluss ausgelöst'}</h3><ul class="acts">${o.sendRes ? o.sendRes.results.map(r => `<li><span class="${r.ok ? 'ok' : ''}" style="${r.ok ? '' : 'color:var(--cs-err);font-weight:700'}">${r.ok ? '✓' : '✗'}</span><span>${esc(r.t)}</span></li>`).join('') : autoList(o).map(a => `<li><span class="muted">${a.on ? '•' : '–'}</span><span>${esc(a.t)}</span></li>`).join('')}</ul></div>
     <div class="factions"><button class="btn btn-s" data-act="edit">Protokoll bearbeiten</button><button class="btn btn-p" data-act="list">Zu den Startgesprächen</button></div>
   </div></div>`;
-  $$('[data-act]', el).forEach(b => b.addEventListener('click', () => { const a = b.dataset.act; if (a === 'pdf') { logO(o, 'PDFs erneut an unterhalt@clean-service.ch gesendet'); save(); toast('PDFs an unterhalt@clean-service.ch gesendet', 'sent'); } if (a === 'edit') { UI.step = 0; go('prot'); } if (a === 'list') { go('list'); openPanel(o.id); } }));
+  $$('[data-act]', el).forEach(b => b.addEventListener('click', () => { const a = b.dataset.act; if (a === 'pdf') { if (b.disabled) return; b.disabled = true; toast('PDFs werden erstellt und gesendet …', 'info');
+    runAktion(o, 'pdf', { x: sendX(o) }).then(rs => { const L = objOf(o.id) || o; logO(L, 'PDFs erneut: ' + resTxt(rs)); save(); toast(rs.every(r => r.ok) ? 'PDFs an unterhalt@clean-service.ch gesendet' : 'Nicht gesendet: ' + badTxt(rs), rs.every(r => r.ok) ? 'sent' : 'error'); })
+      .catch(e => { if (e.message !== 'login') toast('Nicht gesendet: ' + e.message, 'error'); }).finally(() => { b.disabled = false; }); } if (a === 'edit') { UI.step = 0; go('prot'); } if (a === 'list') { go('list'); openPanel(o.id); } }));
 }
 
 /* ===================== Neues Objekt ===================== */
