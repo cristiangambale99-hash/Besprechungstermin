@@ -44,7 +44,7 @@ function mapObj(o, c) {
 }
 async function sync() {
   if (!E.VK_KEY) return { neu: 0, hinweis: 'Verbindung zum Verkaufstool noch nicht eingerichtet (VK_KEY fehlt)' };
-  const objs = await vk(`docs?select=data&path=like.${enc('objects/*')}&data->>status=eq.gewonnen`);
+  const objs = await vk(`docs?select=data&path=like.${enc('objects/*')}&data->>status=eq.gewonnen&or=(deleted.is.null,deleted.eq.false)`);
   const ab = GO_LIVE(), cand = objs.map(r => r.data).filter(o => o && o.id && (((o.annahme && o.annahme.at) || o.auftragAm || '').slice(0, 10) >= ab));
   if (!cand.length) return { neu: 0 };
   const have = await db(`gespraeche?select=id,status,daten&id=in.(${cand.map(o => '"' + o.id + '"').join(',')})`);
